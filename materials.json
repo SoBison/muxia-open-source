@@ -6,24 +6,24 @@
   "repository": {
     "provider": "GitHub",
     "suggestedName": "muxia-open-source",
-    "url": null
+    "url": "https://github.com/SoBison/muxia-open-source"
   },
   "release": {
     "suggestedTag": "v1.0.0-build7-materials",
     "url": null,
     "published": false,
-    "status": "pending-publication-and-hosted-app-payload-refresh"
+    "status": "pending-release-publication"
   },
   "assets": [
     {
       "fileName": "Muxia-OpenSource-Materials.zip",
-      "byteCount": 970391464,
-      "sha256": "ebf428f2e05caf56f99f43c9151e144c11a4afc6cbfb1c8a4e55ca1cc16fa00b",
-      "deliveryManifestSHA256": "f2fa19471c2f509bcd9c2d1cb4a06ebdccdf134a4d6713b64befdb45be253b08",
+      "byteCount": 970449762,
+      "sha256": "8cad5c1261d287d08eb40fc16f1cedb7fde77f6b4f6b0c84112e7be7e3e2b03e",
+      "deliveryManifestSHA256": "9ac0cd232c65c674bf4b16d13348b6b026823fd10d09ca2cbee3888cdee95423",
       "downloadURL": null,
       "published": false,
       "purpose": "Exact corresponding-source, notices and application/native relink materials; large payload is a Release asset, not Git history",
-      "status": "local-pre-hosted-candidate-not-current-published-asset"
+      "status": "verified-hosted-payload-awaiting-publication"
     }
   ]
 }

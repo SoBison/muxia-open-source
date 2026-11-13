@@ -6,13 +6,15 @@ This repository contains selected third-party/runtime sources, SDK-free adapters
 
 Release-asset availability is recorded in `materials.json`, together with the file name, size, SHA-256 and version. Real download URLs are added after the asset is published.
 
-The registered file is a local pre-hosted candidate. The hosted-download App payload still needs fresh object verification and an updated asset hash; this candidate is not a current published release.
+The registered materials now match the hosted-download mechanism, and the App objects have passed relocated relink verification. Public Release availability and download-verification status are recorded in `materials.json`.
 
 ## Contents
 
 `src/` preserves the selected runtime/Native/bridge changes and necessary producer scripts. Each runtime has its own `rr_host.py`; do not replace all variants with the canonical host. `headers/` contains public dependency headers; `licenses/` preserves original notices; `tools/` restores sources and replays App/Native links. `inventory.json` identifies the selected files and their origins. Historical QA/fixtures and machine-generated provenance remain outside this code selection.
 
 The separate Release asset `Muxia-OpenSource-Materials.zip` contains the complete source archives, exact build inputs, App objects, static libraries, public framework providers and full inventory. Large archives and binaries are kept out of Git history. Cloning this repository alone does not provide every relink input.
+
+The Release asset also includes verification source for the hosted-delivery mechanism in `HostedDelivery/Source/`: the two legal-page Swift files `ReleaseLegalManifest.swift` and `LegalNoticesView.swift`, plus the related generation/check scripts. No other App business Swift is included, and this selection does not expand the existing license scope.
 
 Live2D is unsupported. No Live2D Core, Cubism Native Framework, models or Apple SDK bodies are supplied here. Compatibility names and SDK-free stubs do not enable that capability.
 
@@ -30,7 +32,7 @@ The materializer checks and copies source files without executing them. Repeat `
 
 ## Relink
 
-Supply your own legally installed matching Xcode/iPhoneOS SDK. See the Chinese README for the complete App command; pass `--kit /fresh/materials/AppRelink/Kit`, the exact manifest SHA from that kit, and `--artifact-root /fresh/materials/NativeRelink/Providers` to `tools/replay_portable.py`.
+Supply your own legally installed matching Xcode/iPhoneOS SDK. See the Chinese README for the complete App command; pass `--kit /fresh/materials/AppRelink/Kit`, `--manifest-sha 920bd2fbed5bb4237aceda1f45ce2eef0f3c5938fecc899016385ea77224aa9c`, and `--artifact-root /fresh/materials/NativeRelink/Providers` to `tools/replay_portable.py`.
 
 For Native relinking, use `tools/replay_native.py --kit /fresh/materials/NativeRelink --sources /fresh/materials/Sources --providers /fresh/materials/NativeRelink/Providers`, plus the explicit SDK, clang and fresh-output parameters shown by `--help`. The source directory must contain the original `inventory.json` and `objects/`. Read the asset's component-specific build instructions and comparison limits. A successful link does not assert that all resulting binary bytes equal the supplied images.
 

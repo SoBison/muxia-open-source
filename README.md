@@ -6,7 +6,7 @@
 
 完整材料资产的发布状态以 `materials.json` 为准，其中记录文件名、版本、大小和 SHA-256；下载 URL 在 Release 实际发布后填写。
 
-当前登记的是本地预备资产；改为托管下载后的 App 对象材料仍需重新核验并更新资产哈希，不把这个候选标为当前已发布版本。
+登记的材料已按托管下载机制更新，App 对象已完成搬迁后的重链接核验。Release 资产的公开发布和下载核验状态以 `materials.json` 为准。
 
 ## Git 与 Release 的范围
 
@@ -16,6 +16,8 @@
 - `tools/`：来源恢复和 App／Native 重链接工具。
 - `inventory.json`：本仓库选定文件的大小、哈希和来源；机器生成的大型原始输入／签收记录在完整 Release 资产中保留。
 - Release 资产 `Muxia-OpenSource-Materials.zip`：完整对应源码归档、精确构建输入、App 对象、静态库、公共 framework providers 以及完整清单。大型归档和二进制不放入 Git history；只克隆 Git 不等于取得全部重链接输入。
+
+Release 资产另包含托管交付机制的验证源码：`ReleaseLegalManifest.swift`、`LegalNoticesView.swift` 两份法律页面相关 Swift，以及相应生成／检查脚本。它们位于 `HostedDelivery/Source/`，不包含其他 App 业务 Swift，也不改变原有许可范围。
 
 不支持 Live2D；不会提供或下载 Live2D Core／Cubism Native Framework、模型或 Apple SDK。保留的兼容性名称或 SDK-free stub 不表示启用了该能力。历史 QA/probe/fixture 与机器来源报告没有作为仓库代码收录；完整材料仍保留其实际范围和来源。
 
@@ -36,7 +38,7 @@ python3 tools/materialize_sources.py --source /fresh/materials/Sources --output 
 使用自己合法安装、与清单匹配的 Xcode／iPhoneOS SDK；不从本仓库复制 Apple 工具或 SDK。App 对象与 providers 来自完整 Release 资产：
 
 ```sh
-python3 tools/replay_portable.py --kit /fresh/materials/AppRelink/Kit   --manifest-sha fc7f4dcf5cfba5acdf430a78b7a0a79d2b152f08583f62d4993515fd205cd3d7   --artifact-root /fresh/materials/NativeRelink/Providers   --sdk /path/to/iPhoneOS27.1.sdk   --clang /path/to/XcodeDefault.xctoolchain/usr/bin/clang   --output /fresh/unsigned-app-replay
+python3 tools/replay_portable.py --kit /fresh/materials/AppRelink/Kit   --manifest-sha 920bd2fbed5bb4237aceda1f45ce2eef0f3c5938fecc899016385ea77224aa9c   --artifact-root /fresh/materials/NativeRelink/Providers   --sdk /path/to/iPhoneOS27.1.sdk   --clang /path/to/XcodeDefault.xctoolchain/usr/bin/clang   --output /fresh/unsigned-app-replay
 ```
 
 Native 工具使用 `--kit /fresh/materials/NativeRelink --sources /fresh/materials/Sources --providers /fresh/materials/NativeRelink/Providers`；`--sources` 指向包含 `inventory.json` 和 `objects/` 的原始材料目录，其余参数见 `python3 tools/replay_native.py --help`。组件构建和差异范围以资产内说明／清单为准，不能仅据一次链接成功推断所有二进制字节相同。
