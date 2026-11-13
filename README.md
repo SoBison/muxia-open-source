@@ -4,9 +4,9 @@
 
 这里提供 RenReader / 幕匣 1.0.0（Build 7）的第三方源码、运行时适配代码、修改、头文件、许可和重链接工具。它不是完整 App 业务源码仓库，也不将整个 App 以 MIT 或另一单一许可证重新授权。App 的业务 Swift、作品、存档、账户资料和签名密钥不在本仓库。
 
-完整材料资产的发布状态以 `materials.json` 为准，其中记录文件名、版本、大小和 SHA-256；下载 URL 在 Release 实际发布后填写。
+完整材料已发布到 [v1.0.0-build7-materials](https://github.com/SoBison/muxia-open-source/releases/tag/v1.0.0-build7-materials)。匿名下载已核对文件大小、SHA-256 和内部交付清单；文件名、版本、实际下载地址与发布状态见 `materials.json`。
 
-登记的材料已按托管下载机制更新，App 对象已完成搬迁后的重链接核验。Release 资产的公开发布和下载核验状态以 `materials.json` 为准。
+材料与托管下载机制相配套，App 对象已完成搬迁后的重链接核验。
 
 ## Git 与 Release 的范围
 

@@ -4,9 +4,9 @@
 
 This repository contains selected third-party/runtime sources, SDK-free adapters, changes, headers, notices and relink tools for RenReader 1.0.0 (Build 7). It is not the application's business-source repository and does not relicense the entire app under MIT or any other single license. No business Swift, novels, saves, account data or signing credentials are included.
 
-Release-asset availability is recorded in `materials.json`, together with the file name, size, SHA-256 and version. Real download URLs are added after the asset is published.
+The materials are published in [v1.0.0-build7-materials](https://github.com/SoBison/muxia-open-source/releases/tag/v1.0.0-build7-materials). An anonymous download was checked against the complete byte count, SHA-256 and inner delivery manifest. File name, version, actual download URL and publication status are recorded in `materials.json`.
 
-The registered materials now match the hosted-download mechanism, and the App objects have passed relocated relink verification. Public Release availability and download-verification status are recorded in `materials.json`.
+The materials match the hosted-download mechanism, and the App objects have passed relocated relink verification.
 
 ## Contents
 

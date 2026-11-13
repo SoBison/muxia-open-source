@@ -10,9 +10,9 @@
   },
   "release": {
     "suggestedTag": "v1.0.0-build7-materials",
-    "url": null,
-    "published": false,
-    "status": "pending-release-publication"
+    "url": "https://github.com/SoBison/muxia-open-source/releases/tag/v1.0.0-build7-materials",
+    "published": true,
+    "status": "published-and-anonymously-verified"
   },
   "assets": [
     {
@@ -20,10 +20,10 @@
       "byteCount": 970449762,
       "sha256": "8cad5c1261d287d08eb40fc16f1cedb7fde77f6b4f6b0c84112e7be7e3e2b03e",
       "deliveryManifestSHA256": "9ac0cd232c65c674bf4b16d13348b6b026823fd10d09ca2cbee3888cdee95423",
-      "downloadURL": null,
-      "published": false,
+      "downloadURL": "https://github.com/SoBison/muxia-open-source/releases/download/v1.0.0-build7-materials/Muxia-OpenSource-Materials.zip",
+      "published": true,
       "purpose": "Exact corresponding-source, notices and application/native relink materials; large payload is a Release asset, not Git history",
-      "status": "verified-hosted-payload-awaiting-publication"
+      "status": "published-and-anonymously-verified"
     }
   ]
 }
