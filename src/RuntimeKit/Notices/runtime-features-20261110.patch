@@ -1,0 +1,901 @@
+--- a/RuntimeKit/Native/RRControllerHaptics.h
++++ b/RuntimeKit/Native/RRControllerHaptics.h
+@@ -0,0 +1,16 @@
++#ifndef RR_CONTROLLER_HAPTICS_CANDIDATE_H
++#define RR_CONTROLLER_HAPTICS_CANDIDATE_H
++#include <stdint.h>
++
++/* C ABI 1, owner/main thread only. UUID words use network-byte order.
++ * All return 0 on success, -2 wrong owner, -3 invalid input, -4 wrong thread.
++ * Begin binds a denied owner; Policy enables only that exact owner.
++ * End is owner-scoped; Reset is for native RRPlatformBegin/End only.
++ * No symbols in this header have been published into current artifacts. */
++int RRPlatformControllerHapticsVersion(void);
++int RRPlatformControllerHapticsCapabilities(void); /* bit 0: compiled MFI backend */
++int RRPlatformControllerHapticsBegin(uint64_t sessionHigh, uint64_t sessionLow, uint64_t epoch);
++int RRPlatformControllerHapticsPolicy(uint64_t sessionHigh, uint64_t sessionLow, uint64_t epoch, int enabled);
++int RRPlatformControllerHapticsEnd(uint64_t sessionHigh, uint64_t sessionLow, uint64_t epoch);
++void RRPlatformControllerHapticsReset(void);
++#endif
+--- a/RuntimeKit/Native/RRControllerHapticsPolicy.inc
++++ b/RuntimeKit/Native/RRControllerHapticsPolicy.inc
+@@ -0,0 +1,76 @@
++/* Candidate only. Included after the SDL MFI cleanup function is declared.
++ * Callers hold SDL_LockJoysticks and use the runtime owner thread. */
++#include <stdint.h>
++#include <stdatomic.h>
++
++static uint64_t rr_haptic_high, rr_haptic_low, rr_haptic_epoch;
++static int rr_haptic_bound;
++static _Atomic int rr_controller_haptics_allowed;
++static uint64_t rr_haptic_generation;
++
++static int rr_haptic_owner(uint64_t high, uint64_t low, uint64_t epoch) {
++    return rr_haptic_bound && high == rr_haptic_high && low == rr_haptic_low && epoch == rr_haptic_epoch;
++}
++
++__attribute__((visibility("default"))) int RRPlatformControllerHapticsVersion(void) { return 1; }
++__attribute__((visibility("default"))) int RRPlatformControllerHapticsCapabilities(void) {
++#ifdef ENABLE_MFI_RUMBLE
++    return 1;
++#else
++    return 0;
++#endif
++}
++
++__attribute__((visibility("default"))) int RRPlatformControllerHapticsBegin(uint64_t high, uint64_t low, uint64_t epoch) {
++    if (!rr_haptic_owner_thread()) return -4;
++    if ((!high && !low) || !epoch) return -3;
++    SDL_LockJoysticks();
++    int result = 0;
++    if (rr_haptic_bound) result = rr_haptic_owner(high, low, epoch) ? 0 : -2;
++    else {
++        rr_haptic_high = high; rr_haptic_low = low; rr_haptic_epoch = epoch; rr_haptic_bound = 1;
++        atomic_store(&rr_controller_haptics_allowed, 0); ++rr_haptic_generation;
++        rr_haptic_cleanup_controllers();
++    }
++    SDL_UnlockJoysticks(); return result;
++}
++
++__attribute__((visibility("default"))) int RRPlatformControllerHapticsPolicy(uint64_t high, uint64_t low, uint64_t epoch, int enabled) {
++    if (!rr_haptic_owner_thread()) return -4;
++    if (enabled != 0 && enabled != 1) return -3;
++    SDL_LockJoysticks();
++    int result = -2;
++    if (rr_haptic_owner(high, low, epoch)) {
++        if (atomic_load(&rr_controller_haptics_allowed) != enabled) {
++            atomic_store(&rr_controller_haptics_allowed, 0);
++            rr_haptic_cleanup_controllers(); ++rr_haptic_generation;
++            atomic_store(&rr_controller_haptics_allowed, enabled);
++        }
++        result = 0;
++    }
++    SDL_UnlockJoysticks(); return result;
++}
++
++__attribute__((visibility("default"))) int RRPlatformControllerHapticsEnd(uint64_t high, uint64_t low, uint64_t epoch) {
++    if (!rr_haptic_owner_thread()) return -4;
++    SDL_LockJoysticks();
++    int result = -2;
++    if (rr_haptic_owner(high, low, epoch)) {
++        atomic_store(&rr_controller_haptics_allowed, 0);
++        rr_haptic_cleanup_controllers(); ++rr_haptic_generation;
++        rr_haptic_bound = 0; rr_haptic_high = rr_haptic_low = rr_haptic_epoch = 0;
++        result = 0;
++    }
++    SDL_UnlockJoysticks(); return result;
++}
++
++/* Native RRPlatformBegin/End must call this, in addition to the UI-owned End.
++ * Reset always denies new effects before stopping existing owned engines. */
++__attribute__((visibility("default"))) void RRPlatformControllerHapticsReset(void) {
++    if (!rr_haptic_owner_thread()) return;
++    SDL_LockJoysticks();
++    atomic_store(&rr_controller_haptics_allowed, 0);
++    rr_haptic_cleanup_controllers(); ++rr_haptic_generation;
++    rr_haptic_bound = 0; rr_haptic_high = rr_haptic_low = rr_haptic_epoch = 0;
++    SDL_UnlockJoysticks();
++}
+--- a/RuntimeKit/Native/RRInputGate.c
++++ b/RuntimeKit/Native/RRInputGate.c
+@@ -1,6 +1,7 @@
+ /* Host keyboard ownership around SDL2.0.20's public/native event path. */
+ #include "RRInputGate.h"
+ #include "RRAuxiliaryInput.h"
++#include "RRMFIInputGate.h"
+ #include <pthread.h>
+ #include <stdatomic.h>
+ #include <string.h>
+@@ -86,6 +87,7 @@
+ int RRInputGateEnterPost(const SDL_Event *event) {
+     lock();
+     if (!event) { RRInputGateLeave(); return 0; }
++    if (!RRMFIInputAllowPost(event, blocked)) { stats.rejectedPosts++; RRInputGateLeave(); return 0; }
+     if (blocked && (event->type == SDL_MOUSEMOTION || event->type == SDL_MOUSEBUTTONDOWN || event->type == SDL_MOUSEBUTTONUP || event->type == SDL_MOUSEWHEEL)
+         && event->motion.which == RR_AUX_MOUSE_ID && !(emittingRelease && event->type == SDL_MOUSEBUTTONUP)) {
+         stats.rejectedPosts++; RRInputGateLeave(); return 0;
+@@ -110,6 +112,7 @@
+ }
+ 
+ void RRInputGateDidDeliver(const SDL_Event *event) {
++    RRMFIInputDidDeliver(event);
+     if (event && (event->type == SDL_MOUSEBUTTONDOWN || event->type == SDL_MOUSEBUTTONUP)
+         && event->button.which == RR_AUX_MOUSE_ID && event->button.button >= 1 && event->button.button <= 3) {
+         int button = event->button.button;
+@@ -154,6 +157,7 @@
+             && event->motion.which == RR_AUX_MOUSE_ID)) auxiliaryPostFailures++;
+ }
+ void RRInputGateDidRemove(const SDL_Event *event) {
++    RRMFIInputDidRemove(event);
+     /* CutEvent is shared by GET, FlushEvents and an author's FilterEvents.
+      * A dropped boundary must become retryable; it was never delivered. GET
+      * has already cleared the debt in DidDeliver before reaching this hook. */
+@@ -278,6 +282,7 @@
+     blocked = value;
+     stats.generation++;
+     if (blocked) {
++        RRMFIInputBlockQueue();
+         lockModifiers = SDL_GetModState() & (KMOD_CAPS | KMOD_NUM | KMOD_SCROLL);
+         /* This takes SDL's queue lock without replacing an author's filter or
+          * flushing other event types. GET delivery bookkeeping runs under that
+--- a/RuntimeKit/Native/RRMFIInputGate.h
++++ b/RuntimeKit/Native/RRMFIInputGate.h
+@@ -0,0 +1,12 @@
++#pragma once
++#include "SDL.h"
++
++/* Hidden native integration only; no Python/Bridge/API expansion. */
++void RRMFIInputSetBlocked(int blocked);
++void RRMFIInputReset(void);
++/* Under SDL queue lock: atomics/queue-owned snapshots only, no SDL/locks. */
++void RRMFIInputDidDeliver(const SDL_Event *event);
++void RRMFIInputDidRemove(const SDL_Event *event);
++int RRMFIInputAllowPost(const SDL_Event *event, int blocked);
++/* Existing recursive Gate lock held; Gate -> Queue, never Joystick. */
++void RRMFIInputBlockQueue(void);
+--- a/RuntimeKit/Native/RRMFIInputGate.inc
++++ b/RuntimeKit/Native/RRMFIInputGate.inc
+@@ -0,0 +1,354 @@
++/* New controlled-MFI scope only. Other existing SDL backends stay unchanged.
++ * Existing runtime MFI Update/GC notification ownership stays on main; normal
++ * producer callbacks preserve SDL core's unlocked dispatch and take Gate.
++ * Platform/reset/close take Joystick -> Gate -> Queue; queue callbacks never
++ * acquire either producer lock. GET/remove use atomics and queue-owned snapshots;
++ * they never take either producer lock or call SDL. */
++#include "RRInputGate.h"
++#include "RRMFIInputGate.h"
++#include <pthread.h>
++#include <stdatomic.h>
++#include <string.h>
++
++#define DEVICES 64
++#define BUTTONS 64
++#define AXES 16
++#define HATS 4
++#define JBUTTON 0
++#define CBUTTON 64
++#define JAXIS 128
++#define CAXIS 144
++#define JHAT 160
++#define SIGNALS 164
++
++typedef struct {
++    _Atomic int value, pending, queued;
++    SDL_Event last, release;
++} Signal;
++typedef struct {
++    _Atomic int id, quarantined, pendingCount;
++    SDL_Joystick *joystick;
++    int naxes, nbuttons, nhats;
++    uint64_t generation;
++    Sint16 rawAxis[AXES];
++    Uint8 rawButton[BUTTONS], rawHat[HATS];
++    Signal signals[SIGNALS];
++} Device;
++static Device devices[DEVICES];
++static pthread_once_t once = PTHREAD_ONCE_INIT;
++static _Atomic int initialized;
++static _Thread_local int postingBoundary;
++/* A private centering observation travels through normal SDL author filters
++ * and controller watchers, then is refused at the queue's second admission.
++ * Only this explicitly owned pointer gets the exception; direct author Peep
++ * submissions never acquire an implicit outer-post lease. */
++static _Thread_local const SDL_Event *neutralWatcherEvent;
++static _Thread_local int neutralWatcherPhase;
++static _Thread_local SDL_JoystickID neutralWatcherOwner;
++
++static void initialize(void) {
++    for (int i = 0; i < DEVICES; i++) atomic_store(&devices[i].id, -1);
++    atomic_store_explicit(&initialized, 1, memory_order_release);
++}
++static int rawNeutral(const Device *device, int axis) {
++    return device->naxes == 6 && (axis == 2 || axis == 5) ? SDL_JOYSTICK_AXIS_MIN : 0;
++}
++static int neutral(const Device *device, int signal) {
++    return signal >= JAXIS && signal < CAXIS ? rawNeutral(device, signal - JAXIS) : 0;
++}
++static int signalFor(const SDL_Event *event, int *id) {
++    if (!event || !id) return -1;
++    int signal;
++    switch (event->type) {
++        case SDL_JOYBUTTONDOWN: case SDL_JOYBUTTONUP:
++            if (event->jbutton.button >= BUTTONS) return -1;
++            *id = event->jbutton.which; return JBUTTON + event->jbutton.button;
++        case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP:
++            if (event->cbutton.button >= BUTTONS) return -1;
++            *id = event->cbutton.which; return CBUTTON + event->cbutton.button;
++        case SDL_JOYAXISMOTION:
++            signal = event->jaxis.axis; if (signal >= AXES) return -1;
++            *id = event->jaxis.which; return JAXIS + signal;
++        case SDL_CONTROLLERAXISMOTION:
++            signal = event->caxis.axis; if (signal >= AXES) return -1;
++            *id = event->caxis.which; return CAXIS + signal;
++        case SDL_JOYHATMOTION:
++            signal = event->jhat.hat; if (signal >= HATS) return -1;
++            *id = event->jhat.which; return JHAT + signal;
++        default: return -1; /* Hotplug, author/user and other device events. */
++    }
++}
++static Device *find(int id) {
++    if (id < 0 || !atomic_load_explicit(&initialized, memory_order_acquire)) return NULL;
++    for (int i = 0; i < DEVICES; i++)
++        if (atomic_load_explicit(&devices[i].id, memory_order_acquire) == id) return &devices[i];
++    return NULL;
++}
++/* Slot id remains -1 for every initialization step. Queue observers must
++ * never see an empty roster entry temporarily published as instance zero. */
++static void prepare(Device *device, SDL_Joystick *joystick) {
++    device->joystick = joystick;
++    device->naxes = joystick->naxes; device->nbuttons = joystick->nbuttons; device->nhats = joystick->nhats;
++    device->generation = UINT64_MAX;
++    atomic_store(&device->quarantined, 1); atomic_store(&device->pendingCount, 0);
++    memset(device->rawAxis, 0, sizeof(device->rawAxis));
++    memset(device->rawButton, 0, sizeof(device->rawButton));
++    memset(device->rawHat, 0, sizeof(device->rawHat));
++    for (int i = 0; i < SIGNALS; i++) {
++        Signal *signal = &device->signals[i];
++        atomic_store(&signal->value, 0); atomic_store(&signal->pending, 0); atomic_store(&signal->queued, 0);
++        memset(&signal->last, 0, sizeof(signal->last)); memset(&signal->release, 0, sizeof(signal->release));
++    }
++    for (int axis = 0; axis < AXES; axis++) {
++        device->rawAxis[axis] = (Sint16)rawNeutral(device, axis);
++        atomic_store(&device->signals[JAXIS + axis].value, rawNeutral(device, axis));
++    }
++}
++static Device *admit(SDL_Joystick *joystick) {
++    pthread_once(&once, initialize);
++    if (joystick->instance_id < 0 || joystick->naxes < 0 || joystick->nbuttons < 0 || joystick->nhats < 0) return NULL;
++    Device *device = find(joystick->instance_id);
++    if (device) return device;
++    if (joystick->naxes > AXES || joystick->nbuttons > BUTTONS || joystick->nhats > HATS) return NULL;
++    for (int i = 0; i < DEVICES; i++) {
++        device = &devices[i];
++        if (atomic_load(&device->id) != -1) continue;
++        prepare(device, joystick);
++        atomic_store_explicit(&device->id, joystick->instance_id, memory_order_release);
++        return device;
++    }
++    SDL_SetError("The controlled MFI input roster is full");
++    return NULL; /* The producer still writes neutral, never uncontrolled input. */
++}
++static int filter(void *context, SDL_Event *event) {
++    int id, signal = signalFor(event, &id);
++    if (signal < 0) return 1;
++    Device *device = context;
++    return device ? id != atomic_load(&device->id) : find(id) == NULL;
++}
++static void makePending(Device *device) {
++    for (int i = 0; i < SIGNALS; i++) {
++        Signal *signal = &device->signals[i];
++        if (atomic_load(&signal->value) == neutral(device, i) || atomic_load(&signal->pending)) continue;
++        signal->release = signal->last;
++        signal->release.common.timestamp = SDL_GetTicks();
++        if (i < CBUTTON) { signal->release.type = SDL_JOYBUTTONUP; signal->release.jbutton.state = SDL_RELEASED; }
++        else if (i < JAXIS) { signal->release.type = SDL_CONTROLLERBUTTONUP; signal->release.cbutton.state = SDL_RELEASED; }
++        else if (i < CAXIS) signal->release.jaxis.value = (Sint16)neutral(device, i);
++        else if (i < JHAT) signal->release.caxis.value = 0;
++        else signal->release.jhat.value = SDL_HAT_CENTERED;
++        atomic_store(&signal->queued, 0);
++        atomic_store_explicit(&signal->pending, 1, memory_order_release);
++        atomic_fetch_add(&device->pendingCount, 1);
++    }
++}
++static void retry(void) {
++    if (!(SDL_WasInit(SDL_INIT_EVENTS) & SDL_INIT_EVENTS)) return;
++    for (int i = 0; i < DEVICES; i++) {
++        Device *device = &devices[i];
++        if (atomic_load(&device->id) < 0) continue;
++        if (!device->joystick && !atomic_load(&device->pendingCount)) {
++            SDL_FilterEvents(filter, device); /* queue barrier before slot reuse */
++            atomic_store_explicit(&device->id, -1, memory_order_release);
++            continue;
++        }
++        if (!atomic_load(&device->pendingCount)) continue;
++        for (int j = 0; j < SIGNALS; j++) {
++            Signal *signal = &device->signals[j];
++            if (!atomic_load(&signal->pending) || atomic_load(&signal->queued)) continue;
++            postingBoundary++;
++            atomic_store_explicit(&signal->queued, 1, memory_order_release);
++            if (SDL_PeepEvents(&signal->release, 1, SDL_ADDEVENT, 0, 0) <= 0) atomic_store(&signal->queued, 0);
++            postingBoundary--;
++        }
++    }
++}
++static void rr_mfi_input_retry(void) {
++    pthread_once(&once, initialize);
++    RRInputGateLock(); retry(); RRInputGateLeave();
++}
++/* Called by RRInputGateSetBlocked with Gate held; never takes Joystick. */
++void RRMFIInputBlockQueue(void) {
++    pthread_once(&once, initialize);
++    for (int i = 0; i < DEVICES; i++)
++        if (atomic_load(&devices[i].id) >= 0) atomic_store(&devices[i].quarantined, 1);
++    if (SDL_WasInit(SDL_INIT_EVENTS)) SDL_FilterEvents(filter, NULL);
++    for (int i = 0; i < DEVICES; i++) if (atomic_load(&devices[i].id) >= 0) makePending(&devices[i]);
++    retry();
++}
++int RRMFIInputAllowPost(const SDL_Event *event, int blocked) {
++    if (event && event == neutralWatcherEvent) return neutralWatcherPhase++ == 0;
++    int id;
++    if (!event || signalFor(event, &id) < 0) return 1;
++    Device *device = find(id);
++    if (device && neutralWatcherEvent && !postingBoundary && id == neutralWatcherOwner) {
++        int index = signalFor(event, &id);
++        int value = index < CBUTTON ? event->jbutton.state : index < JAXIS ? event->cbutton.state :
++            index < CAXIS ? event->jaxis.value : index < JHAT ? event->caxis.value : event->jhat.value;
++        if (value == neutral(device, index)) return 0;
++    }
++    return !device || postingBoundary || (!blocked && !atomic_load(&device->quarantined));
++}
++void RRMFIInputDidDeliver(const SDL_Event *event) {
++    int id, index = signalFor(event, &id);
++    if (index < 0) return;
++    Device *device = find(id);
++    if (!device) return;
++    Signal *signal = &device->signals[index];
++    int value = index < CBUTTON ? event->jbutton.state : index < JAXIS ? event->cbutton.state :
++        index < CAXIS ? event->jaxis.value : index < JHAT ? event->caxis.value : event->jhat.value;
++    signal->last = *event; /* This callback is serialized by SDL's queue lock. */
++    atomic_store(&signal->value, value);
++    if (value == neutral(device, index)) {
++        if (atomic_exchange(&signal->pending, 0)) atomic_fetch_sub(&device->pendingCount, 1);
++        atomic_store(&signal->queued, 0);
++    }
++}
++void RRMFIInputDidRemove(const SDL_Event *event) {
++    int id, index = signalFor(event, &id);
++    if (index < 0) return;
++    Device *device = find(id);
++    if (!device) return;
++    Signal *signal = &device->signals[index];
++    if (atomic_load(&signal->pending) && atomic_load_explicit(&signal->queued, memory_order_acquire)
++        && memcmp(event, &signal->release, sizeof(*event)) == 0) atomic_store(&signal->queued, 0);
++}
++static Device *before(SDL_Joystick *joystick) {
++    Device *device = admit(joystick);
++    if (!device) return NULL;
++    RRInputGateStats stats; RRInputGateCopyStats(&stats);
++    if (stats.blocked || device->generation != stats.generation) atomic_store(&device->quarantined, 1);
++    device->generation = stats.generation;
++    return device;
++}
++static int rr_mfi_input_axis(SDL_Joystick *joystick, Uint8 axis, Sint16 value) {
++    RRInputGateLock(); Device *device = before(joystick);
++    if (device && axis < AXES) device->rawAxis[axis] = value;
++    Sint16 accepted = !device || atomic_load(&device->quarantined) ?
++        (Sint16)(joystick->naxes == 6 && (axis == 2 || axis == 5) ? SDL_JOYSTICK_AXIS_MIN : 0) : value;
++    int result = SDL_PrivateJoystickAxis(joystick, axis, accepted);
++    RRInputGateLeave(); return result;
++}
++static int rr_mfi_input_button(SDL_Joystick *joystick, Uint8 button, Uint8 value) {
++    RRInputGateLock(); Device *device = before(joystick);
++    if (device && button < BUTTONS) device->rawButton[button] = value;
++    int result = SDL_PrivateJoystickButton(joystick, button, !device || atomic_load(&device->quarantined) ? SDL_RELEASED : value);
++    RRInputGateLeave(); return result;
++}
++static int rr_mfi_input_hat(SDL_Joystick *joystick, Uint8 hat, Uint8 value) {
++    RRInputGateLock(); Device *device = before(joystick);
++    if (device && hat < HATS) device->rawHat[hat] = value;
++    int result = SDL_PrivateJoystickHat(joystick, hat, !device || atomic_load(&device->quarantined) ? SDL_HAT_CENTERED : value);
++    RRInputGateLeave(); return result;
++}
++static void rr_mfi_input_after_update(SDL_Joystick *joystick) {
++    RRInputGateLock(); Device *device = find(joystick->instance_id);
++    if (device) {
++        RRInputGateStats stats; RRInputGateCopyStats(&stats);
++        int released = !stats.blocked && !atomic_load(&device->pendingCount);
++        for (int i = 0; i < device->naxes; i++) {
++            int value = device->rawAxis[i], idle = rawNeutral(device, i);
++            released &= idle == SDL_JOYSTICK_AXIS_MIN ? value <= idle + 8000 : (value >= -8000 && value <= 8000);
++        }
++        for (int i = 0; i < device->nbuttons; i++) released &= !device->rawButton[i];
++        for (int i = 0; i < device->nhats; i++) released &= device->rawHat[i] == SDL_HAT_CENTERED;
++        if (released) atomic_store(&device->quarantined, 0);
++    }
++    retry(); RRInputGateLeave();
++}
++typedef struct {
++    SDL_JoystickID id;
++    Uint32 type;
++    int index, value;
++} Center;
++#define CENTER_EVENTS (DEVICES * (AXES + HATS))
++
++static void observeCenter(const Center *center) {
++    if (SDL_GetEventState(center->type) != SDL_ENABLE) return;
++    SDL_Event event; memset(&event, 0, sizeof(event)); event.type = center->type;
++    if (center->type == SDL_JOYAXISMOTION) {
++        event.jaxis.which = center->id; event.jaxis.axis = (Uint8)center->index; event.jaxis.value = (Sint16)center->value;
++    } else {
++        event.jhat.which = center->id; event.jhat.hat = (Uint8)center->index; event.jhat.value = (Uint8)center->value;
++    }
++    const SDL_Event *previous = neutralWatcherEvent; int phase = neutralWatcherPhase;
++    SDL_JoystickID previousOwner = neutralWatcherOwner;
++    neutralWatcherEvent = &event; neutralWatcherPhase = 0; neutralWatcherOwner = center->id;
++    (void)SDL_PushEvent(&event);
++    neutralWatcherEvent = previous; neutralWatcherPhase = phase; neutralWatcherOwner = previousOwner;
++}
++static void notifyCenters(const Center *centers, int count, uint64_t generation) {
++    /* No Joystick or Gate lock here: authored filters/watchers may reenter SDL
++     * or synchronously ask a peer thread for a public SDL roster read. */
++    for (int i = 0; i < count; i++) {
++        RRInputGateStats current; RRInputGateCopyStats(&current);
++        if (current.generation != generation) break;
++        Device *device = find(centers[i].id);
++        if (device && device->joystick) observeCenter(&centers[i]);
++    }
++}
++static void collectCenter(Device *device, Center *centers, int *count, Uint32 type, int index, int value) {
++    if (!centers || !count || *count >= CENTER_EVENTS) return;
++    centers[(*count)++] = (Center){atomic_load(&device->id), type, index, value};
++}
++static void neutralize(Device *device, Center *centers, int *count) {
++    SDL_Joystick *joystick = device->joystick;
++    if (!joystick || SDL_JoystickFromInstanceID(atomic_load(&device->id)) != joystick) { device->joystick = NULL; return; }
++    for (int i = 0; i < device->naxes; i++) {
++        int idle = rawNeutral(device, i), previous = joystick->axes[i].value;
++        SDL_PrivateJoystickAxis(joystick, i, (Sint16)idle);
++        if (previous != idle) collectCenter(device, centers, count, SDL_JOYAXISMOTION, i, idle);
++    }
++    for (int i = 0; i < device->nbuttons; i++) SDL_PrivateJoystickButton(joystick, i, SDL_RELEASED);
++    for (int i = 0; i < device->nhats; i++) {
++        Uint8 previous = joystick->hats[i];
++        SDL_PrivateJoystickHat(joystick, i, SDL_HAT_CENTERED);
++        if (previous != SDL_HAT_CENTERED) collectCenter(device, centers, count, SDL_JOYHATMOTION, i, SDL_HAT_CENTERED);
++    }
++}
++void RRMFIInputSetBlocked(int blocked) {
++    (void)blocked; /* Actual normalized state/generation comes from pinned Gate. */
++    Center centers[CENTER_EVENTS]; int count = 0;
++    pthread_once(&once, initialize);
++    SDL_LockJoysticks(); RRInputGateLock();
++    RRInputGateStats stats; RRInputGateCopyStats(&stats);
++    for (int i = 0; i < DEVICES; i++) {
++        Device *device = &devices[i];
++        if (atomic_load(&device->id) < 0 || device->generation == stats.generation) continue;
++        atomic_store(&device->quarantined, 1); device->generation = stats.generation;
++        neutralize(device, centers, &count);
++        if (device->joystick) device->joystick->driver->Update(device->joystick);
++    }
++    retry(); RRInputGateLeave(); SDL_UnlockJoysticks();
++    notifyCenters(centers, count, stats.generation);
++}
++static void rr_mfi_input_forget(SDL_Joystick *joystick) {
++    RRInputGateLock(); Device *device = find(joystick->instance_id);
++    if (device) {
++        atomic_store(&device->quarantined, 1);
++        if (SDL_WasInit(SDL_INIT_EVENTS)) SDL_FilterEvents(filter, device);
++        makePending(device); neutralize(device, NULL, NULL); device->joystick = NULL;
++        retry();
++        if (!atomic_load(&device->pendingCount)) {
++            if (SDL_WasInit(SDL_INIT_EVENTS)) SDL_FilterEvents(filter, device);
++            atomic_store_explicit(&device->id, -1, memory_order_release);
++        }
++    }
++    RRInputGateLeave();
++}
++void RRMFIInputReset(void) {
++    Center centers[CENTER_EVENTS]; int count = 0;
++    pthread_once(&once, initialize);
++    SDL_LockJoysticks(); RRInputGateLock();
++    RRInputGateStats stats; RRInputGateCopyStats(&stats);
++    RRMFIInputBlockQueue();
++    for (int i = 0; i < DEVICES; i++) {
++        Device *device = &devices[i];
++        if (atomic_load(&device->id) < 0) continue;
++        neutralize(device, centers, &count);
++        device->generation = UINT64_MAX;
++        if (!device->joystick && !(SDL_WasInit(SDL_INIT_EVENTS) & SDL_INIT_EVENTS)) atomic_store(&device->id, -1);
++    }
++    retry(); RRInputGateLeave(); SDL_UnlockJoysticks();
++    notifyCenters(centers, count, stats.generation);
++}
+--- a/RuntimeKit/Native/RRPlatform.m
++++ b/RuntimeKit/Native/RRPlatform.m
+@@ -3,6 +3,8 @@
+ #include <string.h>
+ #include "RRInputGate.h"
+ #include "RRAuxiliaryInput.h"
++#include "RRControllerHaptics.h"
++#include "RRMFIInputGate.h"
+ #import <GameController/GameController.h>
+ 
+ extern void SDL_SetMainReady(void);
+@@ -19,6 +21,7 @@
+     RRInputGateStats current; RRInputGateCopyStats(&current);
+     if (!blocked && current.blocked) RRPlatformResyncPhysicalKeyboard();
+     RRInputGateSetBlocked(blocked);
++    RRMFIInputSetBlocked(!!blocked);
+ }
+ 
+ __attribute__((visibility("default")))
+@@ -58,7 +61,9 @@
+ 
+ __attribute__((visibility("default")))
+ void RRPlatformBegin(RRLookupFunction lookup) {
++    RRPlatformControllerHapticsReset();
+     RRInputGateBegin();
++    RRMFIInputReset();
+     hostLookup = lookup;
+     NSString *path = [[[NSBundle mainBundle].privateFrameworksURL URLByAppendingPathComponent:@"MetalANGLE.framework/MetalANGLE"] path];
+     angleHandle = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+@@ -71,13 +76,16 @@
+             RRInputGateSetBlocked(1);
+             RRPlatformResyncPhysicalKeyboard();
+             RRInputGateSetBlocked(previous.blocked);
++            RRMFIInputSetBlocked(previous.blocked);
+         }];
+     }
+ }
+ 
+ __attribute__((visibility("default")))
+ void RRPlatformEnd(void) {
++    RRPlatformControllerHapticsReset();
+     RRInputGateEnd();
++    RRMFIInputReset();
+     RRAuxiliaryReset();
+     SDL_iPhoneSetEventPump(0);
+ }
+--- a/RuntimeKit/Native/SDL_mfijoystick-candidate.m
++++ b/RuntimeKit/Native/SDL_mfijoystick-candidate.m
+@@ -98,6 +98,13 @@
+ #define ENABLE_PHYSICAL_INPUT_PROFILE
+ #endif
+ 
++/* RenReader candidate: enable MFI input + owned rumble only. The old
++ * prebuilt object had no MFI path; additional modern capabilities stay off. */
++#undef ENABLE_MFI_BATTERY
++#undef ENABLE_MFI_LIGHT
++#undef ENABLE_MFI_SENSORS
++#undef ENABLE_MFI_SYSTEM_GESTURE_STATE
++#undef ENABLE_PHYSICAL_INPUT_PROFILE
+ #ifdef ENABLE_MFI_RUMBLE
+ #import <CoreHaptics/CoreHaptics.h>
+ #endif
+@@ -110,6 +117,12 @@
+ #endif /* SDL_JOYSTICK_iOS_ACCELEROMETER */
+ 
+ static SDL_JoystickDeviceItem *deviceList = NULL;
++static int rr_haptic_owner_thread(void) { return NSThread.isMainThread; }
++static void rr_haptic_cleanup_controllers(void);
++static void rr_haptic_cleanup_device(SDL_JoystickDeviceItem *device);
++#include "RRMFIInputGate.inc"
++#include "RRControllerHapticsPolicy.inc"
++
+ 
+ static int numjoysticks = 0;
+ int SDL_AppleTVRemoteOpenedAsJoystick = 0;
+@@ -403,7 +416,7 @@
+ 
+ #if defined(SDL_JOYSTICK_iOS_ACCELEROMETER) || defined(SDL_JOYSTICK_MFI)
+ static void
+-IOS_AddJoystickDevice(GCController *controller, SDL_bool accelerometer)
++IOS_AddJoystickDeviceUnlocked(GCController *controller, SDL_bool accelerometer)
+ {
+     SDL_JoystickDeviceItem *device = deviceList;
+ 
+@@ -470,10 +483,21 @@
+ 
+     SDL_PrivateJoystickAdded(device->instance_id);
+ }
++
++static void
++IOS_AddJoystickDevice(GCController *controller, SDL_bool accelerometer)
++{
++    /* GC notifications are main-thread delivered, but public SDL access may
++     * concurrently hold the joystick lock. Keep the entire roster mutation
++     * in the same recursive lock order as normal driver Update/Close. */
++    SDL_LockJoysticks();
++    IOS_AddJoystickDeviceUnlocked(controller, accelerometer);
++    SDL_UnlockJoysticks();
++}
+ #endif /* SDL_JOYSTICK_iOS_ACCELEROMETER || SDL_JOYSTICK_MFI */
+ 
+ static SDL_JoystickDeviceItem *
+-IOS_RemoveJoystickDevice(SDL_JoystickDeviceItem *device)
++IOS_RemoveJoystickDeviceUnlocked(SDL_JoystickDeviceItem *device)
+ {
+     SDL_JoystickDeviceItem *prev = NULL;
+     SDL_JoystickDeviceItem *next = NULL;
+@@ -501,6 +525,8 @@
+     }
+ 
+     if (device->joystick) {
++        if (!device->accelerometer) rr_mfi_input_forget(device->joystick);
++        rr_haptic_cleanup_device(device);
+         device->joystick->hwdata = NULL;
+     }
+ 
+@@ -523,6 +549,15 @@
+     SDL_free(device->name);
+     SDL_free(device);
+ 
++    return next;
++}
++
++static SDL_JoystickDeviceItem *
++IOS_RemoveJoystickDevice(SDL_JoystickDeviceItem *device)
++{
++    SDL_LockJoysticks();
++    SDL_JoystickDeviceItem *next = IOS_RemoveJoystickDeviceUnlocked(device);
++    SDL_UnlockJoysticks();
+     return next;
+ }
+ 
+@@ -622,6 +657,8 @@
+ static void
+ IOS_JoystickDetect(void)
+ {
++    if (!NSThread.isMainThread) return; /* No Gate acquisition under off-main core Detect. */
++    rr_mfi_input_retry();
+ }
+ 
+ static const char *
+@@ -936,11 +973,11 @@
+             hatstate = IOS_MFIJoystickHatStateForDPad(gamepad.dpad);
+ 
+             for (i = 0; i < SDL_arraysize(axes); i++) {
+-                SDL_PrivateJoystickAxis(joystick, i, axes[i]);
++                rr_mfi_input_axis(joystick, i, axes[i]);
+             }
+ 
+             for (i = 0; i < button_count; i++) {
+-                SDL_PrivateJoystickButton(joystick, i, buttons[i]);
++                rr_mfi_input_button(joystick, i, buttons[i]);
+             }
+ 
+ #ifdef ENABLE_MFI_SENSORS
+@@ -985,7 +1022,7 @@
+             hatstate = IOS_MFIJoystickHatStateForDPad(gamepad.dpad);
+ 
+             for (i = 0; i < button_count; i++) {
+-                SDL_PrivateJoystickButton(joystick, i, buttons[i]);
++                rr_mfi_input_button(joystick, i, buttons[i]);
+             }
+         }
+ #if TARGET_OS_TV
+@@ -998,7 +1035,7 @@
+             };
+ 
+             for (i = 0; i < SDL_arraysize(axes); i++) {
+-                SDL_PrivateJoystickAxis(joystick, i, axes[i]);
++                rr_mfi_input_axis(joystick, i, axes[i]);
+             }
+ 
+             Uint8 buttons[joystick->nbuttons];
+@@ -1019,19 +1056,19 @@
+ #pragma clang diagnostic pop
+ 
+             for (i = 0; i < button_count; i++) {
+-                SDL_PrivateJoystickButton(joystick, i, buttons[i]);
++                rr_mfi_input_button(joystick, i, buttons[i]);
+             }
+         }
+ #endif /* TARGET_OS_TV */
+ 
+         if (joystick->nhats > 0) {
+-            SDL_PrivateJoystickHat(joystick, 0, hatstate);
++            rr_mfi_input_hat(joystick, 0, hatstate);
+         }
+ 
+         if (joystick->hwdata->uses_pause_handler) {
+             for (i = 0; i < joystick->hwdata->num_pause_presses; i++) {
+-                SDL_PrivateJoystickButton(joystick, pause_button_index, SDL_PRESSED);
+-                SDL_PrivateJoystickButton(joystick, pause_button_index, SDL_RELEASED);
++                rr_mfi_input_button(joystick, pause_button_index, SDL_PRESSED);
++                rr_mfi_input_button(joystick, pause_button_index, SDL_RELEASED);
+             }
+             joystick->hwdata->num_pause_presses = 0;
+         }
+@@ -1088,6 +1125,7 @@
+ 
+ -(void)cleanup
+ {
++    self.active = false;
+     @autoreleasepool {
+         if (@available(macos 11.0, iOS 14.0, tvOS 14.0, *)) {
+             if (self.player != nil) {
+@@ -1166,27 +1204,28 @@
+         [self.engine startAndReturnError:&error];
+         if (error != nil) {
+             SDL_SetError("Couldn't start haptics engine");
++            [self cleanup];
+             return nil;
+         }
+ 
+         __weak typeof(self) weakSelf = self;
+         self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason stoppedReason) {
+-            SDL_RumbleMotor *_this = weakSelf;
+-            if (_this == nil) {
+-                return;
+-            }
+-
+-            _this.player = nil;
+-            _this.engine = nil;
++            dispatch_async(dispatch_get_main_queue(), ^{
++                SDL_RumbleMotor *_this = weakSelf;
++                if (_this == nil) return;
++                _this.player = nil;
++                _this.engine = nil;
++                _this.active = false;
++            });
+         };
+         self.engine.resetHandler = ^{
+-            SDL_RumbleMotor *_this = weakSelf;
+-            if (_this == nil) {
+-                return;
+-            }
+-
+-            _this.player = nil;
+-            [_this.engine startAndReturnError:nil];
++            dispatch_async(dispatch_get_main_queue(), ^{
++                SDL_RumbleMotor *_this = weakSelf;
++                if (_this == nil || !atomic_load(&rr_controller_haptics_allowed)) return;
++                _this.player = nil;
++                _this.active = false;
++                [_this.engine startAndReturnError:nil];
++            });
+         };
+ 
+         return self;
+@@ -1244,6 +1283,8 @@
+ {
+     [self.m_low_frequency_motor cleanup];
+     [self.m_high_frequency_motor cleanup];
++    [self.m_left_trigger_motor cleanup];
++    [self.m_right_trigger_motor cleanup];
+ }
+ 
+ @end
+@@ -1262,16 +1303,48 @@
+                                                            LeftTriggerMotor:left_trigger_motor
+                                                           RightTriggerMotor:right_trigger_motor];
+             }
++            [low_frequency_motor cleanup];
++            [high_frequency_motor cleanup];
++            [left_trigger_motor cleanup];
++            [right_trigger_motor cleanup];
+         }
+     }
+     return nil;
+ }
+ 
+ #endif /* ENABLE_MFI_RUMBLE */
++
++static void rr_haptic_cleanup_device(SDL_JoystickDeviceItem *device)
++{
++#ifdef ENABLE_MFI_RUMBLE
++    if (device->rumble) {
++        SDL_RumbleContext *rumble = (__bridge SDL_RumbleContext *)device->rumble;
++        [rumble cleanup];
++        CFRelease(device->rumble);
++        device->rumble = NULL;
++    }
++#endif
++    if (device->joystick) {
++        device->joystick->low_frequency_rumble = device->joystick->high_frequency_rumble = 0;
++        device->joystick->left_trigger_rumble = device->joystick->right_trigger_rumble = 0;
++        device->joystick->rumble_expiration = device->joystick->trigger_rumble_expiration = 0;
++    }
++}
++
++static void rr_haptic_cleanup_controllers(void)
++{
++    SDL_LockJoysticks();
++    for (SDL_JoystickDeviceItem *device = deviceList; device; device = device->next) {
++        rr_haptic_cleanup_device(device);
++    }
++    SDL_UnlockJoysticks();
++}
+ 
+ static int
+ IOS_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
+ {
++    if (!atomic_load(&rr_controller_haptics_allowed)) return 0;
++    if (!NSThread.isMainThread) return SDL_SetError("Rumble belongs to the runtime owner thread");
+ #ifdef ENABLE_MFI_RUMBLE
+     SDL_JoystickDeviceItem *device = joystick->hwdata;
+ 
+@@ -1302,6 +1375,8 @@
+ static int
+ IOS_JoystickRumbleTriggers(SDL_Joystick *joystick, Uint16 left_rumble, Uint16 right_rumble)
+ {
++    if (!atomic_load(&rr_controller_haptics_allowed)) return 0;
++    if (!NSThread.isMainThread) return SDL_SetError("Rumble belongs to the runtime owner thread");
+ #ifdef ENABLE_MFI_RUMBLE
+     SDL_JoystickDeviceItem *device = joystick->hwdata;
+ 
+@@ -1429,6 +1504,7 @@
+ static void
+ IOS_JoystickUpdate(SDL_Joystick *joystick)
+ {
++    if (!NSThread.isMainThread) return; /* Existing UIKit/Python runtime owner. */
+     SDL_JoystickDeviceItem *device = joystick->hwdata;
+ 
+     if (device == NULL) {
+@@ -1439,6 +1515,7 @@
+         IOS_AccelerometerUpdate(joystick);
+     } else if (device->controller) {
+         IOS_MFIJoystickUpdate(joystick);
++        rr_mfi_input_after_update(joystick);
+     }
+ }
+ 
+@@ -1451,6 +1528,7 @@
+         return;
+     }
+ 
++    if (!device->accelerometer) rr_mfi_input_forget(joystick);
+     device->joystick = NULL;
+ 
+     @autoreleasepool {
+@@ -1528,10 +1606,48 @@
+     numjoysticks = 0;
+ }
+ 
++/* Match IOS_MFIJoystickUpdate's exact compact button/axis order. This
++ * supplies the existing SDL automatic-mapping path when the retained core's
++ * built-in database was compiled without SDL_JOYSTICK_MFI mappings. */
++static SDL_bool RRBuildMFIMap(int naxes, int nhats, int nbuttons, Uint32 mask, SDL_GamepadMapping *out)
++{
++    if (!out) return SDL_FALSE;
++    SDL_zero(*out);
++    const Uint32 base_mask = (1u << SDL_CONTROLLER_BUTTON_A) | (1u << SDL_CONTROLLER_BUTTON_B) |
++        (1u << SDL_CONTROLLER_BUTTON_X) | (1u << SDL_CONTROLLER_BUTTON_Y) |
++        (1u << SDL_CONTROLLER_BUTTON_LEFTSHOULDER) | (1u << SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) |
++        (1u << SDL_CONTROLLER_BUTTON_START);
++    const Uint32 optional_mask = (1u << SDL_CONTROLLER_BUTTON_LEFTSTICK) | (1u << SDL_CONTROLLER_BUTTON_RIGHTSTICK) |
++        (1u << SDL_CONTROLLER_BUTTON_BACK) | (1u << SDL_CONTROLLER_BUTTON_GUIDE);
++    if ((naxes != 0 && naxes != 6) || nhats != 1 || nbuttons < 7 || nbuttons > 11 ||
++        (mask & base_mask) != base_mask || (mask & ~(base_mask | optional_mask))) return SDL_FALSE;
++    SDL_InputMapping *base[] = {&out->a, &out->b, &out->x, &out->y, &out->leftshoulder, &out->rightshoulder};
++    for (int i = 0; i < 6; ++i) { base[i]->kind = EMappingKind_Button; base[i]->target = (Uint8)i; }
++    int button = 6;
++#define RR_MFI_BUTTON(field, name) if (mask & (1u << name)) { out->field.kind = EMappingKind_Button; out->field.target = (Uint8)button++; }
++    RR_MFI_BUTTON(leftstick, SDL_CONTROLLER_BUTTON_LEFTSTICK);
++    RR_MFI_BUTTON(rightstick, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
++    RR_MFI_BUTTON(back, SDL_CONTROLLER_BUTTON_BACK);
++    RR_MFI_BUTTON(guide, SDL_CONTROLLER_BUTTON_GUIDE);
++    RR_MFI_BUTTON(start, SDL_CONTROLLER_BUTTON_START);
++#undef RR_MFI_BUTTON
++    if (button != nbuttons) { SDL_zero(*out); return SDL_FALSE; }
++    SDL_InputMapping *hats[] = {&out->dpup, &out->dpdown, &out->dpleft, &out->dpright};
++    Uint8 directions[] = {SDL_HAT_UP, SDL_HAT_DOWN, SDL_HAT_LEFT, SDL_HAT_RIGHT};
++    for (int i = 0; i < 4; ++i) { hats[i]->kind = EMappingKind_Hat; hats[i]->target = directions[i]; }
++    if (naxes == 6) {
++        SDL_InputMapping *axes[] = {&out->leftx, &out->lefty, &out->lefttrigger, &out->rightx, &out->righty, &out->righttrigger};
++        for (int i = 0; i < 6; ++i) { axes[i]->kind = EMappingKind_Axis; axes[i]->target = (Uint8)i; }
++    }
++    return SDL_TRUE;
++}
++
+ static SDL_bool
+ IOS_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
+ {
+-    return SDL_FALSE;
++    SDL_JoystickDeviceItem *device = GetDeviceForIndex(device_index);
++    if (!device || device->accelerometer || !device->controller) return SDL_FALSE;
++    return RRBuildMFIMap(device->naxes, device->nhats, device->nbuttons, device->button_mask, out);
+ }
+ 
+ #if defined(SDL_JOYSTICK_MFI) && defined(__MACOSX__)

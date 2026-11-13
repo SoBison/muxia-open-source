@@ -1,0 +1,11 @@
+--- a/renpy/loader.py
++++ b/renpy/loader.py
+@@ -492,7 +492,7 @@
+             rv2 = self.f.read(length)
+             self.offset += len(rv2)
+         else:
+-            rv2 = ""
++            rv2 = b""
+ 
+         return (rv1 + rv2)
+ 

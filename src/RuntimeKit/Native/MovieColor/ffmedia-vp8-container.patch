@@ -1,0 +1,32 @@
+--- a/ffmedia.c
++++ b/ffmedia.c
+@@ -275,6 +275,10 @@
+ 	double time_offset;
+ 
+ } MediaState;
++_Static_assert(offsetof(AVFrame, color_range) == 0x180, "AVFrame range ABI");
++_Static_assert(offsetof(AVFrame, colorspace) == 0x18c, "AVFrame colorspace ABI");
++_Static_assert(offsetof(MediaState, video_decode_frame) == 0xd8, "MediaState frame ABI");
++_Static_assert(offsetof(MediaState, sws) == 0xe0, "MediaState sws ABI");
+ 
+ static AVFrame *dequeue_frame(FrameQueue *fq);
+ static void free_packet_queue(PacketQueue *pq);
+@@ -887,6 +891,18 @@
+ 		}
+ 
+ 		int src_range = (ms->video_decode_frame->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
++
++		// VP8 frame headers can overwrite explicit container color metadata.
++		// Keep all other codecs and unspecified container fields on the original path.
++		if (ms->video_context->codec_id == AV_CODEC_ID_VP8) {
++			const AVCodecParameters *parameters = ms->ctx->streams[ms->video_stream]->codecpar;
++			if (parameters->color_space == AVCOL_SPC_BT709) {
++				colorspace = AVCOL_SPC_BT709;
++			}
++			if (parameters->color_range == AVCOL_RANGE_MPEG || parameters->color_range == AVCOL_RANGE_JPEG) {
++				src_range = (parameters->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
++			}
++		}
+ 
+ 		sws_setColorspaceDetails(ms->sws,
+ 			sws_getCoefficients(colorspace), src_range,

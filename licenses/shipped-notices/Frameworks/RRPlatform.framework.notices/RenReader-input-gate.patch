@@ -1,0 +1,539 @@
+--- upstream/src/events/SDL_keyboard.c
++++ renreader/src/events/SDL_keyboard.c
+@@ -19,6 +19,8 @@
+   3. This notice may not be removed or altered from any source distribution.
+ */
+ #include "../SDL_internal.h"
++#include "RRInputGate.h"
++#include "RRAuxiliaryInput.h"
+ 
+ /* General keyboard handling code for SDL */
+ 
+@@ -624,6 +626,7 @@
+ {
+     SDL_Keyboard *keyboard = &SDL_keyboard;
+ 
++    RRAuxiliaryFocusChanged(window ? window->id : 0);
+     if (keyboard->focus && !window) {
+         /* We won't get anymore keyboard messages, so reset keyboard state */
+         SDL_ResetKeyboard();
+@@ -669,7 +672,7 @@
+ }
+ 
+ static int
+-SDL_SendKeyboardKeyInternal(Uint8 source, Uint8 state, SDL_Scancode scancode)
++RRSDL_SDL_SendKeyboardKeyInternal(Uint8 source, Uint8 state, SDL_Scancode scancode)
+ {
+     SDL_Keyboard *keyboard = &SDL_keyboard;
+     int posted;
+@@ -714,7 +717,13 @@
+         if (!keyboard->keystate[scancode]) {
+             return 0;
+         }
+-        keyboard->keysource[scancode] = 0;
++        /* Preserve hardware/autorelease when the host source releases, and
++         * preserve the host source when a hardware release arrives first. */
++        if (source == RR_AUX_KEY_SOURCE || (keyboard->keysource[scancode] & RR_AUX_KEY_SOURCE)) {
++            if (!(keyboard->keysource[scancode] & source)) return 0;
++            keyboard->keysource[scancode] &= ~source;
++            if (keyboard->keysource[scancode]) return 0;
++        } else keyboard->keysource[scancode] = 0;
+     }
+ 
+     /* Update internal keyboard state */
+@@ -788,6 +797,7 @@
+         event.key.keysym.scancode = scancode;
+         event.key.keysym.sym = keycode;
+         event.key.keysym.mod = keyboard->modstate;
++        event.key.keysym.unused = source == RR_AUX_KEY_SOURCE ? RR_AUX_KEY_MARKER : 0;
+         event.key.windowID = keyboard->focus ? keyboard->focus->id : 0;
+         posted = (SDL_PushEvent(&event) > 0);
+     }
+@@ -810,6 +820,50 @@
+     return (posted);
+ }
+ 
++static int
++SDL_SendKeyboardKeyInternal(Uint8 source, Uint8 state, SDL_Scancode scancode)
++{
++    int result;
++    if (!RRInputGateEnterKey(source, state, scancode)) return 0;
++    result = RRSDL_SDL_SendKeyboardKeyInternal(source, state, scancode);
++    RRInputGateLeave();
++    return result;
++}
++
++/* Source-owned state reset: no private structure is borrowed by the host. */
++void RRSDL_ClearKeyboardState(Uint16 lock_modifiers)
++{
++    SDL_memset(SDL_keyboard.keystate, 0, sizeof(SDL_keyboard.keystate));
++    SDL_memset(SDL_keyboard.keysource, 0, sizeof(SDL_keyboard.keysource));
++    SDL_keyboard.modstate = lock_modifiers;
++    SDL_keyboard.autorelease_pending = SDL_FALSE;
++}
++
++int RRSDL_SendAuxiliaryKey(Uint8 state, SDL_Scancode scancode)
++{
++    return SDL_SendKeyboardKeyInternal(RR_AUX_KEY_SOURCE, state, scancode);
++}
++
++void RRSDL_ClearAuxiliaryKeyboardSource(Uint8 released[SDL_NUM_SCANCODES])
++{
++    int scan;
++    SDL_memset(released, 0, SDL_NUM_SCANCODES);
++    for (scan = 1; scan < SDL_NUM_SCANCODES; ++scan) {
++        if (!(SDL_keyboard.keysource[scan] & RR_AUX_KEY_SOURCE)) continue;
++        SDL_keyboard.keysource[scan] &= ~RR_AUX_KEY_SOURCE;
++        if (SDL_keyboard.keysource[scan]) continue;
++        released[scan] = SDL_keyboard.keystate[scan] != 0;
++        SDL_keyboard.keystate[scan] = 0;
++        switch (SDL_keyboard.keymap[scan]) {
++            case SDLK_LCTRL: SDL_keyboard.modstate &= ~KMOD_LCTRL; break;
++            case SDLK_LSHIFT: SDL_keyboard.modstate &= ~KMOD_LSHIFT; break;
++            case SDLK_LALT: SDL_keyboard.modstate &= ~KMOD_LALT; break;
++        }
++    }
++}
++
++
++
+ int
+ SDL_SendKeyboardKey(Uint8 state, SDL_Scancode scancode)
+ {
+@@ -852,8 +906,8 @@
+     return SDL_FALSE;
+ }
+ 
+-int
+-SDL_SendKeyboardText(const char *text)
++static int
++RRSDL_SDL_SendKeyboardText(const char *text)
+ {
+     SDL_Keyboard *keyboard = &SDL_keyboard;
+     int posted;
+@@ -875,8 +929,19 @@
+     return (posted);
+ }
+ 
+-int
+-SDL_SendEditingText(const char *text, int start, int length)
++int SDL_SendKeyboardText(const char *text)
++{
++    int result;
++    if (!RRInputGateEnterText()) return 0;
++    result = RRSDL_SDL_SendKeyboardText(text);
++    RRInputGateLeave();
++    return result;
++}
++
++
++
++static int
++RRSDL_SDL_SendEditingText(const char *text, int start, int length)
+ {
+     SDL_Keyboard *keyboard = &SDL_keyboard;
+     int posted;
+@@ -899,6 +964,17 @@
+ SDL_KeyboardQuit(void)
+ {
+ }
++
++int SDL_SendEditingText(const char *text, int start, int length)
++{
++    int result;
++    if (!RRInputGateEnterText()) return 0;
++    result = RRSDL_SDL_SendEditingText(text, start, length);
++    RRInputGateLeave();
++    return result;
++}
++
++
+ 
+ const Uint8 *
+ SDL_GetKeyboardState(int *numkeys)
+--- upstream/src/events/SDL_events.c
++++ renreader/src/events/SDL_events.c
+@@ -19,6 +19,8 @@
+   3. This notice may not be removed or altered from any source distribution.
+ */
+ #include "../SDL_internal.h"
++#include "RRInputGate.h"
++#include "RRAuxiliaryInput.h"
+ 
+ /* General event handling code for SDL */
+ 
+@@ -608,6 +610,7 @@
+ static void
+ SDL_CutEvent(SDL_EventEntry *entry)
+ {
++    RRInputGateDidRemove(&entry->event);
+     if (entry->prev) {
+         entry->prev->next = entry->next;
+     }
+@@ -657,7 +660,7 @@
+ 
+ /* Lock the event queue, take a peep at it, and unlock it */
+ static int
+-SDL_PeepEventsInternal(SDL_Event * events, int numevents, SDL_eventaction action,
++RRSDL_SDL_PeepEventsInternal(SDL_Event * events, int numevents, SDL_eventaction action,
+                Uint32 minType, Uint32 maxType, SDL_bool include_sentinel)
+ {
+     int i, used;
+@@ -675,7 +678,9 @@
+     if (!SDL_EventQ.lock || SDL_LockMutex(SDL_EventQ.lock) == 0) {
+         if (action == SDL_ADDEVENT) {
+             for (i = 0; i < numevents; ++i) {
+-                used += SDL_AddEvent(&events[i]);
++                int admission = RRInputGateEnterPost(&events[i]);
++                if (admission) used += SDL_AddEvent(&events[i]);
++                if (admission == 2) RRInputGateLeave();
+             }
+         } else {
+             SDL_EventEntry *entry, *next;
+@@ -718,6 +723,7 @@
+                         }
+ 
+                         if (action == SDL_GETEVENT) {
++                            RRInputGateDidDeliver(&entry->event);
+                             SDL_CutEvent(entry);
+                         }
+                     }
+@@ -745,6 +751,18 @@
+ 
+     return (used);
+ }
++static int SDL_PeepEventsInternal(SDL_Event *events, int numevents, SDL_eventaction action,
++                                  Uint32 minType, Uint32 maxType, SDL_bool include_sentinel)
++{
++    int result;
++    if (action == SDL_ADDEVENT) RRInputGateLock();
++    result = RRSDL_SDL_PeepEventsInternal(events, numevents, action, minType, maxType, include_sentinel);
++    if (action == SDL_ADDEVENT) RRInputGateLeave();
++    return result;
++}
++
++
++
+ int
+ SDL_PeepEvents(SDL_Event * events, int numevents, SDL_eventaction action,
+                Uint32 minType, Uint32 maxType)
+@@ -1068,8 +1086,8 @@
+     }
+ }
+ 
+-int
+-SDL_PushEvent(SDL_Event * event)
++static int
++RRSDL_SDL_PushEvent(SDL_Event * event)
+ {
+     event->common.timestamp = SDL_GetTicks();
+ 
+@@ -1121,6 +1139,20 @@
+ 
+     return 1;
+ }
++
++int SDL_PushEvent(SDL_Event *event)
++{
++    int result, admission = RRInputGateEnterPost(event);
++    SDL_Event submitted;
++    if (!admission) return 0;
++    submitted = *event;
++    result = RRSDL_SDL_PushEvent(event);
++    RRInputGateDidPost(&submitted, result);
++    if (admission == 2) RRInputGateLeave();
++    return result;
++}
++
++
+ 
+ void
+ SDL_SetEventFilter(SDL_EventFilter filter, void *userdata)
+@@ -1212,8 +1244,8 @@
+     }
+ }
+ 
+-void
+-SDL_FilterEvents(SDL_EventFilter filter, void *userdata)
++static void
++RRSDL_SDL_FilterEvents(SDL_EventFilter filter, void *userdata)
+ {
+     if (!SDL_EventQ.lock || SDL_LockMutex(SDL_EventQ.lock) == 0) {
+         SDL_EventEntry *entry, *next;
+@@ -1228,6 +1260,15 @@
+         }
+     }
+ }
++
++void SDL_FilterEvents(SDL_EventFilter filter, void *userdata)
++{
++    RRInputGateLock();
++    RRSDL_SDL_FilterEvents(filter, userdata);
++    RRInputGateLeave();
++}
++
++
+ 
+ Uint8
+ SDL_EventState(Uint32 type, int state)
+--- upstream/src/events/SDL_mouse.c
++++ renreader/src/events/SDL_mouse.c
+@@ -19,6 +19,8 @@
+   3. This notice may not be removed or altered from any source distribution.
+ */
+ #include "../SDL_internal.h"
++#include "RRInputGate.h"
++#include "RRAuxiliaryInput.h"
+ 
+ /* General mouse handling code for SDL */
+ 
+@@ -40,6 +42,7 @@
+ 
+ /* The mouse state */
+ static SDL_Mouse SDL_mouse;
++static float rr_aux_wheel_x, rr_aux_wheel_y;
+ 
+ /* for mapping mouse events to touch */
+ static SDL_bool track_mouse_down = SDL_FALSE;
+@@ -286,8 +289,8 @@
+     return SDL_TRUE;
+ }
+ 
+-int
+-SDL_SendMouseMotion(SDL_Window * window, SDL_MouseID mouseID, int relative, int x, int y)
++static int
++RRSDL_SDL_SendMouseMotion(SDL_Window * window, SDL_MouseID mouseID, int relative, int x, int y)
+ {
+     if (window && !relative) {
+         SDL_Mouse *mouse = SDL_GetMouse();
+@@ -324,7 +327,7 @@
+ 
+     /* SDL_HINT_MOUSE_TOUCH_EVENTS: controlling whether mouse events should generate synthetic touch events */
+     if (mouse->mouse_touch_events) {
+-        if (mouseID != SDL_TOUCH_MOUSEID && !relative && track_mouse_down) {
++        if (mouseID != SDL_TOUCH_MOUSEID && mouseID != RR_AUX_MOUSE_ID && !relative && track_mouse_down) {
+             if (window) {
+                 float fx = (float)x / (float)window->w;
+                 float fy = (float)y / (float)window->h;
+@@ -483,6 +486,21 @@
+     return posted;
+ }
+ 
++int SDL_SendMouseMotion(SDL_Window *window, SDL_MouseID mouseID, int relative, int x, int y)
++{
++    RRInputGateStats gate;
++    int result;
++    RRInputGateLock();
++    RRInputGateCopyStats(&gate);
++    /* SDL_UpdateMouseFocus otherwise emits the first synthetic motion with
++     * the global hardware ID before the auxiliary source can emit its own. */
++    if (mouseID == RR_AUX_MOUSE_ID && !gate.blocked) SDL_SetMouseFocus(window);
++    result = (mouseID == RR_AUX_MOUSE_ID && gate.blocked) ? 0 : RRSDL_SDL_SendMouseMotion(window, mouseID, relative, x, y);
++    RRInputGateLeave(); return result;
++}
++
++
++
+ static SDL_MouseInputSource *GetMouseInputSource(SDL_Mouse *mouse, SDL_MouseID mouseID)
+ {
+     SDL_MouseInputSource *source, *sources;
+@@ -526,7 +544,7 @@
+ }
+ 
+ static int
+-SDL_PrivateSendMouseButton(SDL_Window * window, SDL_MouseID mouseID, Uint8 state, Uint8 button, int clicks)
++RRSDL_SDL_PrivateSendMouseButton(SDL_Window * window, SDL_MouseID mouseID, Uint8 state, Uint8 button, int clicks)
+ {
+     SDL_Mouse *mouse = SDL_GetMouse();
+     int posted;
+@@ -542,7 +560,7 @@
+ 
+     /* SDL_HINT_MOUSE_TOUCH_EVENTS: controlling whether mouse events should generate synthetic touch events */
+     if (mouse->mouse_touch_events) {
+-        if (mouseID != SDL_TOUCH_MOUSEID && button == SDL_BUTTON_LEFT) {
++        if (mouseID != SDL_TOUCH_MOUSEID && mouseID != RR_AUX_MOUSE_ID && button == SDL_BUTTON_LEFT) {
+             if (state == SDL_PRESSED) {
+                 track_mouse_down = SDL_TRUE;
+             } else {
+@@ -623,6 +641,7 @@
+         event.button.state = state;
+         event.button.button = button;
+         event.button.clicks = (Uint8) SDL_min(clicks, 255);
++        event.button.padding1 = 0;
+         event.button.x = mouse->x;
+         event.button.y = mouse->y;
+         posted = (SDL_PushEvent(&event) > 0);
+@@ -636,6 +655,19 @@
+     return posted;
+ }
+ 
++static int SDL_PrivateSendMouseButton(SDL_Window *window, SDL_MouseID mouseID, Uint8 state, Uint8 button, int clicks)
++{
++    RRInputGateStats gate;
++    int result;
++    RRInputGateLock();
++    RRInputGateCopyStats(&gate);
++    if (mouseID == RR_AUX_MOUSE_ID && !gate.blocked) SDL_SetMouseFocus(window);
++    result = (mouseID == RR_AUX_MOUSE_ID && gate.blocked) ? 0 : RRSDL_SDL_PrivateSendMouseButton(window, mouseID, state, button, clicks);
++    RRInputGateLeave(); return result;
++}
++
++
++
+ int
+ SDL_SendMouseButtonClicks(SDL_Window * window, SDL_MouseID mouseID, Uint8 state, Uint8 button, int clicks)
+ {
+@@ -649,12 +681,14 @@
+     return SDL_PrivateSendMouseButton(window, mouseID, state, button, -1);
+ }
+ 
+-int
+-SDL_SendMouseWheel(SDL_Window * window, SDL_MouseID mouseID, float x, float y, SDL_MouseWheelDirection direction)
++static int
++RRSDL_SDL_SendMouseWheel(SDL_Window * window, SDL_MouseID mouseID, float x, float y, SDL_MouseWheelDirection direction)
+ {
+     SDL_Mouse *mouse = SDL_GetMouse();
+     int posted;
+     int integral_x, integral_y;
++    float *accumulated_x = mouseID == RR_AUX_MOUSE_ID ? &rr_aux_wheel_x : &mouse->accumulated_wheel_x;
++    float *accumulated_y = mouseID == RR_AUX_MOUSE_ID ? &rr_aux_wheel_y : &mouse->accumulated_wheel_y;
+ 
+     if (window) {
+         SDL_SetMouseFocus(window);
+@@ -665,42 +699,42 @@
+     }
+ 
+     if (x > 0.0f) {
+-        if (mouse->accumulated_wheel_x < 0.0f) {
+-            mouse->accumulated_wheel_x = 0.0f;
++        if ((*accumulated_x) < 0.0f) {
++            (*accumulated_x) = 0.0f;
+         }
+     } else if (x < 0.0f) {
+-        if (mouse->accumulated_wheel_x > 0.0f) {
+-            mouse->accumulated_wheel_x = 0.0f;
+-        }
+-    }
+-    mouse->accumulated_wheel_x += x;
+-    if (mouse->accumulated_wheel_x > 0.0f) {
+-        integral_x = (int)SDL_floor(mouse->accumulated_wheel_x);
+-    } else if (mouse->accumulated_wheel_x < 0.0f) {
+-        integral_x = (int)SDL_ceil(mouse->accumulated_wheel_x);
++        if ((*accumulated_x) > 0.0f) {
++            (*accumulated_x) = 0.0f;
++        }
++    }
++    (*accumulated_x) += x;
++    if ((*accumulated_x) > 0.0f) {
++        integral_x = (int)SDL_floor((*accumulated_x));
++    } else if ((*accumulated_x) < 0.0f) {
++        integral_x = (int)SDL_ceil((*accumulated_x));
+     } else {
+         integral_x = 0;
+     }
+-    mouse->accumulated_wheel_x -= integral_x;
++    (*accumulated_x) -= integral_x;
+ 
+     if (y > 0.0f) {
+-        if (mouse->accumulated_wheel_y < 0.0f) {
+-            mouse->accumulated_wheel_y = 0.0f;
++        if ((*accumulated_y) < 0.0f) {
++            (*accumulated_y) = 0.0f;
+         }
+     } else if (y < 0.0f) {
+-        if (mouse->accumulated_wheel_y > 0.0f) {
+-            mouse->accumulated_wheel_y = 0.0f;
+-        }
+-    }
+-    mouse->accumulated_wheel_y += y;
+-    if (mouse->accumulated_wheel_y > 0.0f) {
+-        integral_y = (int)SDL_floor(mouse->accumulated_wheel_y);
+-    } else if (mouse->accumulated_wheel_y < 0.0f) {
+-        integral_y = (int)SDL_ceil(mouse->accumulated_wheel_y);
++        if ((*accumulated_y) > 0.0f) {
++            (*accumulated_y) = 0.0f;
++        }
++    }
++    (*accumulated_y) += y;
++    if ((*accumulated_y) > 0.0f) {
++        integral_y = (int)SDL_floor((*accumulated_y));
++    } else if ((*accumulated_y) < 0.0f) {
++        integral_y = (int)SDL_ceil((*accumulated_y));
+     } else {
+         integral_y = 0;
+     }
+-    mouse->accumulated_wheel_y -= integral_y;
++    (*accumulated_y) -= integral_y;
+ 
+     /* Post the event, if desired */
+     posted = 0;
+@@ -719,6 +753,26 @@
+     return posted;
+ }
+ 
++int SDL_SendMouseWheel(SDL_Window *window, SDL_MouseID mouseID, float x, float y, SDL_MouseWheelDirection direction)
++{
++    RRInputGateStats gate;
++    int result;
++    RRInputGateLock();
++    RRInputGateCopyStats(&gate);
++    result = (mouseID == RR_AUX_MOUSE_ID && gate.blocked) ? 0 : RRSDL_SDL_SendMouseWheel(window, mouseID, x, y, direction);
++    RRInputGateLeave(); return result;
++}
++
++void RRSDL_ClearAuxiliaryMouseSource(void)
++{
++    int i;
++    rr_aux_wheel_x = rr_aux_wheel_y = 0;
++    for (i = 0; i < SDL_mouse.num_sources; ++i)
++        if (SDL_mouse.sources[i].mouseID == RR_AUX_MOUSE_ID) SDL_mouse.sources[i].buttonstate = 0;
++}
++
++
++
+ void
+ SDL_MouseQuit(void)
+ {
+--- upstream/src/video/SDL_video.c
++++ renreader/src/video/SDL_video.c
+@@ -19,6 +19,7 @@
+   3. This notice may not be removed or altered from any source distribution.
+ */
+ #include "../SDL_internal.h"
++#include "RRAuxiliaryInput.h"
+ 
+ /* The high-level video driver subsystem */
+ 
+@@ -4162,6 +4163,7 @@
+ SDL_StartTextInput(void)
+ {
+     SDL_Window *window;
++    RRAuxiliaryTextInputChanged(1);
+ 
+     /* First, enable text events */
+     SDL_EventState(SDL_TEXTINPUT, SDL_ENABLE);
+@@ -4189,6 +4191,7 @@
+ SDL_StopTextInput(void)
+ {
+     SDL_Window *window;
++    RRAuxiliaryTextInputChanged(0);
+ 
+     /* Stop the text input system */
+     if (_this && _this->StopTextInput) {
+--- upstream/src/joystick/virtual/SDL_virtualjoystick.c
++++ renreader/src/joystick/virtual/SDL_virtualjoystick.c
+@@ -55,6 +55,14 @@
+  
+     if (!hwdata) {
+         return;
++    }
++    /* An opened controller can outlive virtual-device removal. Detach only
++     * this exact virtual hardware object before freeing its storage. */
++    {
++        SDL_Joystick *joystick = SDL_JoystickFromInstanceID(hwdata->instance_id);
++        if (joystick && joystick->driver == &SDL_VIRTUAL_JoystickDriver && joystick->hwdata == hwdata) {
++            joystick->hwdata = NULL;
++        }
+     }
+     if (hwdata->axes) {
+         SDL_free((void *)hwdata->axes);

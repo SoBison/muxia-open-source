@@ -1,0 +1,5 @@
+Muxia application object files
+
+These application object files are supplied for relinking Muxia with modified open-source library components for your own use, and for reverse engineering to debug those modifications. Those activities are permitted for the Muxia-authored portions of the supplied objects.
+
+Each third-party component remains subject to its own included license. This permission does not replace or restrict rights granted by those licenses. Use your own Apple SDK, toolchain, signing credentials and installation setup when rebuilding.

@@ -1,0 +1,10 @@
+--- a/renpy/loader.py
++++ b/renpy/loader.py
+@@ -598,6 +598,7 @@
+                 b = RWopsIO(afn, "rb", base=offset, length=dlen)
+                 rv = RWopsIO.from_split(a, b, name=name)
+                 rv = io.BufferedReader(rv)
++                return rv
+ 
+         # Compatibility path.
+         else:

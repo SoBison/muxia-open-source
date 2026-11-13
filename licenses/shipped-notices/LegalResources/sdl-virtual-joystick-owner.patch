@@ -1,0 +1,17 @@
+--- SDL2.0.20/src/joystick/virtual/SDL_virtualjoystick.c
++++ candidate/src/joystick/virtual/SDL_virtualjoystick.c
+@@ -55,6 +55,14 @@
+  
+     if (!hwdata) {
+         return;
++    }
++    /* An opened controller can outlive virtual-device removal. Detach only
++     * this exact virtual hardware object before freeing its storage. */
++    {
++        SDL_Joystick *joystick = SDL_JoystickFromInstanceID(hwdata->instance_id);
++        if (joystick && joystick->driver == &SDL_VIRTUAL_JoystickDriver && joystick->hwdata == hwdata) {
++            joystick->hwdata = NULL;
++        }
+     }
+     if (hwdata->axes) {
+         SDL_free((void *)hwdata->axes);

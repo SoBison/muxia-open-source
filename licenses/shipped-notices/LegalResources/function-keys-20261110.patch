@@ -1,0 +1,11 @@
+--- a/RuntimeKit/Native/RRAuxiliaryInput.c
++++ b/RuntimeKit/Native/RRAuxiliaryInput.c
+@@ -28,6 +28,8 @@
+         case SDL_SCANCODE_SPACE: case SDL_SCANCODE_BACKSPACE: case SDL_SCANCODE_DELETE:
+         case SDL_SCANCODE_UP: case SDL_SCANCODE_DOWN: case SDL_SCANCODE_LEFT: case SDL_SCANCODE_RIGHT:
+         case SDL_SCANCODE_HOME: case SDL_SCANCODE_END: case SDL_SCANCODE_PAGEUP: case SDL_SCANCODE_PAGEDOWN:
++        case SDL_SCANCODE_F1: case SDL_SCANCODE_F2: case SDL_SCANCODE_F3: case SDL_SCANCODE_F4: case SDL_SCANCODE_F5:
++        case SDL_SCANCODE_F6: case SDL_SCANCODE_F7: case SDL_SCANCODE_F8: case SDL_SCANCODE_F9: case SDL_SCANCODE_F10:
+         case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_LALT: return 1;
+         default: return 0;
+     }

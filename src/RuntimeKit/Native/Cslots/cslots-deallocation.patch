@@ -1,0 +1,37 @@
+--- a/renpy/cslots.pyx
++++ b/renpy/cslots.pyx
+@@ -32,6 +32,7 @@
+ from cpython.mem cimport PyMem_Calloc, PyMem_Free
+ from cpython.object cimport PyObject, PyTypeObject, Py_TPFLAGS_HAVE_GC, PyObject_Free
+ from cpython.ref cimport Py_XINCREF, Py_XDECREF, Py_CLEAR
++from cpython.object cimport Py_TYPE
+ 
+ from copyreg import __newobj__
+ 
+@@ -286,6 +287,17 @@
+                 setattr(self, "name", name)
+             except AttributeError:
+                 pass
++
++
++cdef void rr_dealloc_cobject(PyObject *instance) noexcept:
++    cdef unsigned char i
++    cdef PyTypeObject *object_type = <PyTypeObject *> Py_TYPE(<object> instance)
++    for i in range((<CObject> instance).value_count):
++        if not (<CObject> instance).values[i].integer & INTEGER_FLAG:
++            Py_XDECREF((<CObject> instance).values[i].object)
++    PyMem_Free((<CObject> instance).values)
++    PyObject_Free(instance)
++    Py_XDECREF(<PyObject *> object_type)
+ 
+ 
+ cdef class Slot:
+@@ -471,7 +483,7 @@
+         pto.tp_flags =  pto.tp_flags & ~(Py_TPFLAGS_HAVE_GC)
+         pto.tp_traverse = NULL
+         pto.tp_clear = NULL
+-        pto.tp_dealloc = <void (*)(PyObject *) noexcept> PyObject_Free
++        pto.tp_dealloc = rr_dealloc_cobject
+ 
+         return rv
+ 

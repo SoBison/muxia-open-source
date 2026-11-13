@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "product": "RenReader / 幕匣",
+  "appVersion": "1.0.0",
+  "build": "7",
+  "repository": {
+    "provider": "GitHub",
+    "suggestedName": "muxia-open-source",
+    "url": null
+  },
+  "release": {
+    "suggestedTag": "v1.0.0-build7-materials",
+    "url": null,
+    "published": false,
+    "status": "pending-publication-and-hosted-app-payload-refresh"
+  },
+  "assets": [
+    {
+      "fileName": "Muxia-OpenSource-Materials.zip",
+      "byteCount": 970391464,
+      "sha256": "ebf428f2e05caf56f99f43c9151e144c11a4afc6cbfb1c8a4e55ca1cc16fa00b",
+      "deliveryManifestSHA256": "f2fa19471c2f509bcd9c2d1cb4a06ebdccdf134a4d6713b64befdb45be253b08",
+      "downloadURL": null,
+      "published": false,
+      "purpose": "Exact corresponding-source, notices and application/native relink materials; large payload is a Release asset, not Git history",
+      "status": "local-pre-hosted-candidate-not-current-published-asset"
+    }
+  ]
+}
